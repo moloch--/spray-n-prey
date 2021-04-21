@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 
 import os
+import time
 import random
 import asyncio
 import argparse
 import logging
-
 import paramiko
-
-
 from ipaddress import ip_network
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Dict
@@ -33,19 +31,21 @@ LOG = logging.getLogger('spraynprey')
 
 class TCPScanner(object):
 
-    def __init__(self, open_queues: Dict[int, asyncio.Queue], timeout=5.0, max_workers=32):
+    def __init__(self, open_queues: Dict[int, asyncio.Queue], randomize=False, timeout=5.0, max_workers=32):
         self.timeout = timeout
         self.max_workers = max_workers
+        self.randomize = randomize
         self.tcp_queue = asyncio.Queue()
         self.open_queues = open_queues
-        self.tcp_scan_completed = asyncio.Event()
+        self.scan_completed = asyncio.Event()
+        self.results = []
 
-    def _targets(self, targets: List[str], randomize=False) -> List[str]:
+    def _targets(self, targets: List[str]) -> List[str]:
         ''' Lazily generate hosts in ip ranges '''
         all_targets = []
         for target in targets:
             all_targets.extend([str(ip) for ip in ip_network(target).hosts()])
-        if randomize:
+        if self.randomize:
             random.shuffle(all_targets)
         return all_targets
 
@@ -61,7 +61,7 @@ class TCPScanner(object):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self.tcp_scan_completed.set()
+        self.scan_completed.set()
 
     async def _task_worker(self):
         while True:
@@ -74,6 +74,7 @@ class TCPScanner(object):
                 pass
             else:
                 self.open_queues[port].put_nowait((ip, port,))
+                self.results.append((ip, port,))
             finally:
                 self.tcp_queue.task_done()
 
@@ -89,6 +90,7 @@ class LoginScanner(object):
         self.scan_completed = asyncio.Event()
         self.scan_queue = asyncio.Queue()
         self.results = []
+        self._success_cache = {}
         self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
 
     async def scan(self):
@@ -115,14 +117,18 @@ class LoginScanner(object):
         while True:
             try:
                 ip, port, username, password = (await self.scan_queue.get())
+                if ip in self._success_cache:
+                    continue
                 future = self.thread_pool.submit(self.login_attempt, ip, port, username, password, self.timeout)
                 result = await asyncio.wrap_future(future)
                 if result:
                     self.results.append((ip, port, username, password))
-                self.scan_queue.task_done()
+                    self._success_cache[ip] = True
             except Exception as err:
                 LOG.exception(err)
-    
+            finally:
+                self.scan_queue.task_done()
+
     @staticmethod
     def login_attempt(ip: str, port: int, username: str, password: str, timeout: float) -> bool:
         raise NotImplementedError()
@@ -135,7 +141,7 @@ class LoginScanner(object):
 class SSHLoginScanner(LoginScanner):
 
     @staticmethod
-    def login_attempt(ip: str, port: int, username: str, password: str, timeout: float) -> bool:
+    def login_attempt(ip: str, port: int, username: str, password: str, timeout: float, is_retry=False) -> bool:
         LOG.info('[ssh worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -144,22 +150,33 @@ class SSHLoginScanner(LoginScanner):
             return True
         except (paramiko.BadAuthenticationType, paramiko.AuthenticationException):
             return False
+        except (paramiko.ssh_exception.SSHException,) as err:
+            if not is_retry:
+                LOG.warning('SSH protocol exception, retrying attempt ...')
+                time.sleep(round(random.uniform(0.1, 3.0), 2))
+                return SSHLoginScanner.login_attempt(ip, port, username, password, timeout, True)
         except Exception as err:
             LOG.exception(err)
+        finally:
+            ssh.close()
         return False
 
 
 class SMBLoginScanner(LoginScanner):
 
-    pass
+    @staticmethod
+    def login_attempt(ip: str, port: int, username: str, password: str, timeout: float) -> bool:
+        LOG.info('[smb worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
+        return False
 
 
-
+#
+# > Helpers
+#
 def load_credentials(args) -> List[Tuple[str, str]]:
     with open(args.credentials) as fp:
         lines = [line.strip() for line in fp.readlines() if ':' in line]
     return [line.split(':', 1) for line in lines]
-
 
 def load_targets(args):
     for index, target in enumerate(args.targets):
@@ -168,7 +185,9 @@ def load_targets(args):
                 lines = fp.readlines()
             args.targets[index] = [line.strip() for line in lines if len(line) > 1]
 
-
+#
+# > Main
+#
 async def main(args):
     credentials = load_credentials(args)
 
@@ -177,20 +196,33 @@ async def main(args):
     open_queues = dict((port, asyncio.Queue(),) for port in ports)
 
     # Start the TCP scanner
-    tcp_scanner = TCPScanner(open_queues, args.timeout)
+    tcp_scanner = TCPScanner(open_queues, timeout=args.timeout, max_workers=args.max_tcp_workers)
     tcp_scan = asyncio.create_task(tcp_scanner.scan(args.targets))
 
     login_scans = []
+
     if 'ssh' in args.services:
         ssh_queue = open_queues[SERVICES['ssh']['port']]
-        ssh_scanner = SSHLoginScanner(ssh_queue, credentials, tcp_scanner.tcp_scan_completed)
+        ssh_scanner = SSHLoginScanner(ssh_queue, credentials, tcp_scanner.scan_completed,
+            timeout=args.timeout,
+            max_workers=args.max_login_workers
+        )
         login_scans.append(asyncio.create_task(ssh_scanner.scan()))
+
+    if 'smb' in args.services:
+        smb_queue = open_queues[SERVICES['smb']['port']]
+        smb_scanner = SMBLoginScanner(smb_queue, credentials, tcp_scanner.scan_completed,
+            timeout=args.timeout,
+            max_workers=args.max_login_workers
+        )
+        login_scans.append(asyncio.create_task(smb_scanner.scan()))
 
     await tcp_scan
     print('[*] TCP scan completed')
     await asyncio.gather(*login_scans, return_exceptions=True)
     print('[*] All scans completed')
  
+    print('tcp results: %r' % tcp_scanner.results)
     print('ssh results: %r' % ssh_scanner.results)
 
 
@@ -213,11 +245,17 @@ if __name__ == '__main__':
         action='version',
         version='%(prog)s v0.0.1'
     )
-    parser.add_argument('--max-workers', '-w',
+    parser.add_argument('--max-tcp-workers', '-wT',
         help='max number of workers per queue',
-        dest='max_workers',
+        dest='max_tcp_workers',
         type=int,
         default=min(32, os.cpu_count() + 4)
+    )
+    parser.add_argument('--max-login-workers', '-wL',
+        help='max number of login workers per queue',
+        dest='max_login_workers',
+        type=int,
+        default=4
     )
     parser.add_argument('--timeout', '-T',
         help='connection timeout in seconds',
