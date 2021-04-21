@@ -11,7 +11,6 @@ from ipaddress import ip_network
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Dict
 
-from impacket import smbserver
 from impacket.dcerpc.v5 import transport, scmr
 
 
@@ -189,6 +188,8 @@ class SMBLoginScanner(LoginScanner):
         except Exception as err:
             LOG.exception(err)
         return False
+
+
 #
 # > Helpers
 #
