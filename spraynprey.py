@@ -149,7 +149,7 @@ class LoginScanner(object):
 
 class SSHLoginScanner(LoginScanner):
 
-    title = 'SSH Login Queue'
+    title = 'SSH'
 
     def login_attempt(self, ip: str, port: int, username: str, password: str, is_retry=False) -> bool:
         LOG.info('[ssh worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
@@ -174,7 +174,7 @@ class SSHLoginScanner(LoginScanner):
 
 class SMBLoginScanner(LoginScanner):
 
-    title = 'SMB Login Queue'
+    title = 'SMB'
 
     def __init__(self, *args, **kwargs):
         self.domain = kwargs.get('domain', '')
@@ -215,7 +215,7 @@ def tcp_table(tcp_scanner: TCPScanner):
     title = "TCP Scan Queue [%d]" % (tcp_scanner.tcp_queue.qsize(),)
     return Panel(table, title=title, box=SQUARE)
 
-def login_scanner_table(scanner: LoginScanner):
+def login_scanner_table(index: int, scanner: LoginScanner):
     table = Table(box=MINIMAL_DOUBLE_HEAD, expand=True)
     table.add_column("IP Address")
     table.add_column("Port")
@@ -223,8 +223,20 @@ def login_scanner_table(scanner: LoginScanner):
     table.add_column("Password")
     for entry in list(scanner.scan_queue.contents()):
         table.add_row(*[str(value) for value in entry])
-    title = "%s [%d]"  % (scanner.title, scanner.scan_queue.qsize(),)
+    title = "%s Login Queue [%d]"  % (scanner.title, scanner.scan_queue.qsize(),)
     return Panel(table, title=title, box=SQUARE)
+
+def result_table(index: int, scanner: LoginScanner):
+    table = Table(box=MINIMAL_DOUBLE_HEAD, expand=True, border_style="green")
+    table.add_column("IP Address")
+    table.add_column("Port")
+    table.add_column("Username")
+    table.add_column("Password")
+    for entry in list(scanner.results):
+        table.add_row(*[str(value) for value in entry])
+    title = "%s Results"  % (scanner.title,)
+    return Panel(table, title=title, box=SQUARE, border_style="green")
+
 
 def generate_layout(tcp_scanner, login_scanners):
     layout = Layout()
@@ -232,12 +244,18 @@ def generate_layout(tcp_scanner, login_scanners):
         Layout(name="upper"),
         Layout(name="lower")
     )
-    layout["upper"].ratio = 5
-    columns = [Layout(tcp_table(tcp_scanner), name="tcp")]
-    for scanner in login_scanners:
-        columns.append(login_scanner_table(scanner))
-    layout["upper"].split_row(*columns)
-    layout["lower"].update(Panel(Text("Lower"), box=SQUARE))
+    layout["upper"].ratio = 4
+
+    upper_columns = [Layout(tcp_table(tcp_scanner), name="tcp")]
+    for index, scanner in enumerate(login_scanners):
+        upper_columns.append(login_scanner_table(index, scanner))
+    layout["upper"].split_row(*upper_columns)
+
+    lower_columns = []
+    for index, scanner in enumerate(login_scanners):
+        lower_columns.append(result_table(index, scanner))
+    layout["lower"].split_row(*lower_columns)
+
     return layout
 
 def monitor(done: threading.Event, tcp_scanner: TCPScanner, login_scanners: List[LoginScanner]):
