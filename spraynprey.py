@@ -223,7 +223,7 @@ def login_scanner_table(index: int, scanner: LoginScanner):
     table.add_column("Password")
     for entry in list(scanner.scan_queue.contents()):
         table.add_row(*[str(value) for value in entry])
-    title = "%s Login Queue [%d]"  % (scanner.title, scanner.scan_queue.qsize(),)
+    title = "%s Queue [%d]"  % (scanner.title, scanner.scan_queue.qsize(),)
     return Panel(table, title=title, box=SQUARE)
 
 def result_table(index: int, scanner: LoginScanner):
@@ -234,7 +234,7 @@ def result_table(index: int, scanner: LoginScanner):
     table.add_column("Password")
     for entry in list(scanner.results):
         table.add_row(*[str(value) for value in entry])
-    title = "%s Results"  % (scanner.title,)
+    title = "%s Logins"  % (scanner.title,)
     return Panel(table, title=title, box=SQUARE, border_style="green")
 
 
@@ -245,17 +245,14 @@ def generate_layout(tcp_scanner, login_scanners):
         Layout(name="lower")
     )
     layout["upper"].ratio = 4
-
     upper_columns = [Layout(tcp_table(tcp_scanner), name="tcp")]
     for index, scanner in enumerate(login_scanners):
         upper_columns.append(login_scanner_table(index, scanner))
     layout["upper"].split_row(*upper_columns)
-
     lower_columns = []
     for index, scanner in enumerate(login_scanners):
         lower_columns.append(result_table(index, scanner))
     layout["lower"].split_row(*lower_columns)
-
     return layout
 
 def monitor(done: threading.Event, tcp_scanner: TCPScanner, login_scanners: List[LoginScanner]):
@@ -328,7 +325,6 @@ async def main(args):
     done.set()
     monitor_thread.join()
 
-    print('tcp results: %r' % tcp_scanner.results)
     if 'ssh' in args.services:
         print('ssh results: %r' % ssh_scanner.results)
     if 'smb' in args.services:
