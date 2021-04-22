@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 
+from asyncio.queues import Queue
 import os
 import time
 import random
 import asyncio
-import argparse
 import logging
+import argparse
 import paramiko
+import threading
+
+from rich.text import Text
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.box import SQUARE, MINIMAL_DOUBLE_HEAD
+from rich.layout import Layout
 from ipaddress import ip_network
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Tuple, Dict
-
 from impacket.dcerpc.v5 import transport, scmr
+from typing import List, Tuple, Dict
 
 
 SERVICES = {
-    'ssh': {
-        'port': 22
-    },
-    'smb': {
-        'port': 445,
-    }
+    'ssh': { 'port': 22 },
+    'smb': { 'port': 445 },
 }
 logging.basicConfig(
     filename='spraynprey.log',
@@ -31,13 +35,19 @@ logging.basicConfig(
 LOG = logging.getLogger('spraynprey')
 
 
+class WorkQueue(Queue):
+
+    def contents(self) -> List:
+        return list(self._queue)
+
+
 class TCPScanner(object):
 
     def __init__(self, open_queues: Dict[int, asyncio.Queue], randomize=False, timeout=5.0, max_workers=32):
         self.timeout = timeout
         self.max_workers = max_workers
         self.randomize = randomize
-        self.tcp_queue = asyncio.Queue()
+        self.tcp_queue = WorkQueue()
         self.open_queues = open_queues
         self.scan_completed = asyncio.Event()
         self.results = []
@@ -83,6 +93,8 @@ class TCPScanner(object):
 
 class LoginScanner(object):
 
+    title = ''
+
     def __init__(self, queue: asyncio.Queue, credentials: Tuple[str, str], tcp_scan_completed: asyncio.Event, timeout=5.0, max_workers=4):
         self.queue = queue
         self.credentails = credentials
@@ -90,7 +102,7 @@ class LoginScanner(object):
         self.max_workers = max_workers
         self.tcp_scan_completed = tcp_scan_completed
         self.scan_completed = asyncio.Event()
-        self.scan_queue = asyncio.Queue()
+        self.scan_queue = WorkQueue()
         self.results = []
         self._success_cache = {}
         self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
@@ -134,11 +146,10 @@ class LoginScanner(object):
     def login_attempt(self, ip: str, port: int, username: str, password: str) -> bool:
         raise NotImplementedError()
 
-    def deliver_payload(self, ip: str, port: int, username: str, password: str, payload: str) -> bool:
-        raise NotImplementedError()
-
 
 class SSHLoginScanner(LoginScanner):
+
+    title = 'SSH Login Queue'
 
     def login_attempt(self, ip: str, port: int, username: str, password: str, is_retry=False) -> bool:
         LOG.info('[ssh worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
@@ -163,6 +174,8 @@ class SSHLoginScanner(LoginScanner):
 
 class SMBLoginScanner(LoginScanner):
 
+    title = 'SMB Login Queue'
+
     def __init__(self, *args, **kwargs):
         self.domain = kwargs.get('domain', '')
         del kwargs['domain']
@@ -172,7 +185,7 @@ class SMBLoginScanner(LoginScanner):
         LOG.info('[smb worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
         try:
             stringbinding = r'ncacn_np:%s[\pipe\svcctl]' % ip
-            logging.debug('StringBinding %s'%stringbinding)
+            logging.debug('StringBinding %s' % stringbinding)
             rpc_transport = transport.DCERPCTransportFactory(stringbinding)
             rpc_transport.set_dport(port)
             rpc_transport.setRemoteHost(ip)
@@ -189,6 +202,51 @@ class SMBLoginScanner(LoginScanner):
             LOG.exception(err)
         return False
 
+
+#
+# > User Interface Code
+#
+def tcp_table(tcp_scanner: TCPScanner):
+    table = Table(box=MINIMAL_DOUBLE_HEAD, expand=True)
+    table.add_column("IP Address")
+    table.add_column("Port")
+    for entry in list(tcp_scanner.tcp_queue.contents()):
+        table.add_row(str(entry[0]), str(entry[1]))
+    title = "TCP Scan Queue [%d]" % (tcp_scanner.tcp_queue.qsize(),)
+    return Panel(table, title=title, box=SQUARE)
+
+def login_scanner_table(scanner: LoginScanner):
+    table = Table(box=MINIMAL_DOUBLE_HEAD, expand=True)
+    table.add_column("IP Address")
+    table.add_column("Port")
+    table.add_column("Username")
+    table.add_column("Password")
+    for entry in list(scanner.scan_queue.contents()):
+        table.add_row(*[str(value) for value in entry])
+    title = "%s [%d]"  % (scanner.title, scanner.scan_queue.qsize(),)
+    return Panel(table, title=title, box=SQUARE)
+
+def generate_layout(tcp_scanner, login_scanners):
+    layout = Layout()
+    layout.split_column(
+        Layout(name="upper"),
+        Layout(name="lower")
+    )
+    layout["upper"].ratio = 5
+    columns = [Layout(tcp_table(tcp_scanner), name="tcp")]
+    for scanner in login_scanners:
+        columns.append(login_scanner_table(scanner))
+    layout["upper"].split_row(*columns)
+    layout["lower"].update(Panel(Text("Lower"), box=SQUARE))
+    return layout
+
+def monitor(done: threading.Event, tcp_scanner: TCPScanner, login_scanners: List[LoginScanner]):
+    layout = generate_layout(tcp_scanner, login_scanners)
+    with Live(layout, screen=True) as live:
+        while not done.is_set():
+            time.sleep(0.1)
+            layout = generate_layout(tcp_scanner, login_scanners)
+            live.update(layout)
 
 #
 # > Helpers
@@ -220,6 +278,7 @@ async def main(args):
     tcp_scan = asyncio.create_task(tcp_scanner.scan(args.targets))
 
     login_scans = []
+    login_scanners = []
 
     if 'ssh' in args.services:
         ssh_queue = open_queues[SERVICES['ssh']['port']]
@@ -228,6 +287,7 @@ async def main(args):
             max_workers=args.max_login_workers
         )
         login_scans.append(asyncio.create_task(ssh_scanner.scan()))
+        login_scanners.append(ssh_scanner)
 
     if 'smb' in args.services:
         smb_queue = open_queues[SERVICES['smb']['port']]
@@ -237,12 +297,19 @@ async def main(args):
             max_workers=args.max_login_workers
         )
         login_scans.append(asyncio.create_task(smb_scanner.scan()))
+        login_scanners.append(smb_scanner)
+
+    done = threading.Event()
+    monitor_thread = threading.Thread(target=monitor, args=(
+        done, tcp_scanner, login_scanners
+    ))
+    monitor_thread.start()
 
     await tcp_scan
-    print('[*] TCP scan completed')
     await asyncio.gather(*login_scans, return_exceptions=True)
-    print('[*] All scans completed')
- 
+    done.set()
+    monitor_thread.join()
+
     print('tcp results: %r' % tcp_scanner.results)
     if 'ssh' in args.services:
         print('ssh results: %r' % ssh_scanner.results)
