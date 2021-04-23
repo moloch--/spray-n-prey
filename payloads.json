@@ -1,0 +1,26 @@
+{
+    "i686": {
+        "upload": [
+
+        ],
+        "commands": [
+
+        ]
+    },
+    "x86_64": {
+        "upload": [
+
+        ],
+        "commands": [
+            "echo \"\" > /tmp/test"
+        ]
+    },
+    "default": {
+        "upload": [
+
+        ],
+        "commands": [
+
+        ]
+    }
+}
