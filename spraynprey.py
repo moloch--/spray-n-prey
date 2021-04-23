@@ -335,7 +335,7 @@ async def main(args):
     if 'ssh' in args.services:
         ssh_queue = open_queues[SERVICES['ssh']['port']]
         ssh_scanner = SSHLoginScanner(ssh_queue, credentials, tcp_scanner.scan_completed,
-            payloads=load_payloads(),
+            payloads=load_payloads(args),
             timeout=args.timeout,
             max_workers=args.max_login_workers
         )
@@ -346,7 +346,7 @@ async def main(args):
         smb_queue = open_queues[SERVICES['smb']['port']]
         smb_scanner = SMBLoginScanner(smb_queue, credentials, tcp_scanner.scan_completed,
             domain=args.windows_domain,
-            payloads=load_payloads(),
+            payloads=load_payloads(args),
             timeout=args.timeout,
             max_workers=args.max_login_workers
         )
