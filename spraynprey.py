@@ -101,11 +101,12 @@ class LoginScanner(object):
 
     title = ''
 
-    def __init__(self, queue: asyncio.Queue, credentials: Tuple[str, str], tcp_scan_completed: asyncio.Event, timeout=5.0, max_workers=4):
+    def __init__(self, queue: asyncio.Queue, credentials: Tuple[str, str], tcp_scan_completed: asyncio.Event, payloads={}, timeout=5.0, max_workers=4):
         self.queue = queue
         self.credentails = credentials
         self.timeout = timeout
         self.max_workers = max_workers
+        self.payloads = payloads
         self.tcp_scan_completed = tcp_scan_completed
         self.scan_completed = asyncio.Event()
         self.scan_queue = WorkQueue()
@@ -167,7 +168,7 @@ class SSHLoginScanner(LoginScanner):
             
             arch = stdout.read().decode('utf-8').strip()
             LOG.info('Remote system architecture is %r' % arch)
-            
+
             if arch in self.payloads:
                 # Upload and execute
                 sftp = ssh.open_sftp()
@@ -334,6 +335,7 @@ async def main(args):
     if 'ssh' in args.services:
         ssh_queue = open_queues[SERVICES['ssh']['port']]
         ssh_scanner = SSHLoginScanner(ssh_queue, credentials, tcp_scanner.scan_completed,
+            payloads=load_payloads(),
             timeout=args.timeout,
             max_workers=args.max_login_workers
         )
@@ -344,6 +346,7 @@ async def main(args):
         smb_queue = open_queues[SERVICES['smb']['port']]
         smb_scanner = SMBLoginScanner(smb_queue, credentials, tcp_scanner.scan_completed,
             domain=args.windows_domain,
+            payloads=load_payloads(),
             timeout=args.timeout,
             max_workers=args.max_login_workers
         )
