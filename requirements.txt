@@ -15,7 +15,7 @@ ldap3==2.9
 ldapdomaindump==0.9.3
 macholib==1.14
 MarkupSafe==1.1.1
-paramiko==2.7.2
+paramiko==2.10.1
 pyasn1==0.4.8
 pycparser==2.20
 pycryptodomex==3.10.1
