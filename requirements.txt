@@ -6,7 +6,7 @@ colorama==0.4.4
 commonmark==0.9.1
 cryptography==3.4.7
 dnspython==2.1.0
-Flask==1.1.2
+Flask==2.3.2
 future==0.18.2
 impacket @ https://github.com/SecureAuthCorp/impacket/releases/download/impacket_0_9_22/impacket-0.9.22.tar.gz
 itsdangerous==1.1.0
